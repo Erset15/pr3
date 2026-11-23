@@ -22,17 +22,7 @@ google/siglip-base-patch16-224 | Модель №2 для сравнения
 
 ## Структура проекта
 
-text
-pr3/
-├── main.py                 # основной скрипт (через Inference API)
-├── requirements.txt        # зависимости
-├── README.md               # этот файл
-└── dataset/
-    ├── 0af52a69...jpg      # изображения самолётов (в перемешку)
-    ├── 2.jpg
-    ├── su30mk2-8.jpg
-    ├── ...
-    └── labels_auto.csv     # автоматическая разметка (создаётся скриптом)
+<pre style="background:#f6f8fa; color:#24292f; padding:12px; border-radius:6px; border:1px solid #d0d7de; font-family:Consolas, 'Courier New', monospace; font-size:13px; line-height:1.5; overflow-x:auto;">pr3/<br>├── main.py&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# основной скрипт (через Inference API)<br>├── requirements.txt&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# зависимости<br>├── README.md&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# этот файл<br>└── dataset/<br>&nbsp;&nbsp;&nbsp;&nbsp;├── 0af52a69...jpg&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# изображения самолётов (в перемешку)<br>&nbsp;&nbsp;&nbsp;&nbsp;├── 2.jpg<br>&nbsp;&nbsp;&nbsp;&nbsp;├── su30mk2-8.jpg<br>&nbsp;&nbsp;&nbsp;&nbsp;├── ...<br>&nbsp;&nbsp;&nbsp;&nbsp;└── labels_auto.csv&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# автоматическая разметка (создаётся скриптом)</pre>
 
 ## Установка
 
