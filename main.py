@@ -1,188 +1,223 @@
+"""
+Перед запуском установите зависимости и токен:
+
+pip install huggingface_hub pillow scikit-learn
+$env:HF_TOKEN="hf_ваш_токен"
+python main.py
+"""
+
+import os
 import csv
+import sys
 from pathlib import Path
+
 from PIL import Image
-import torch
-from transformers import pipeline
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from huggingface_hub import InferenceClient
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+)
 
-# ================= НАСТРОЙКИ =================
-DATA_DIR = Path("dataset")
-LABELS_CSV = DATA_DIR / "labels_auto.csv"
+# ---------- НАСТРОЙКИ ----------
+DATASET_DIR = Path("dataset")
+LABELS_CSV = DATASET_DIR / "labels_auto.csv"
+IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
-# Кандидатные метки для zero-shot
-CANDIDATE_LABELS = ["a military aircraft", "a civilian aircraft"]
-
-# Модель-аннотатор (ей размечаем) и две модели для сравнения
 ANNOTATOR_MODEL = "openai/clip-vit-base-patch32"
 MODEL_1 = "openai/clip-vit-base-patch32"
 MODEL_2 = "google/siglip-base-patch16-224"
 
-IMAGE_EXTS = ("*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG")
-BATCH_SIZE = 8
+CANDIDATE_LABELS = ["military aircraft", "civilian aircraft"]
+LABEL_MAP = {"military aircraft": "military", "civilian aircraft": "civilian"}
 
-# Порог уверенности: если модель не уверена — помечаем как "uncertain"
 CONFIDENCE_THRESHOLD = 0.60
-# ============================================
+
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if not HF_TOKEN:
+    print("Ошибка: не задан HF_TOKEN. Установите переменную окружения HF_TOKEN.")
+    sys.exit(1)
+
+client = InferenceClient(provider="hf-inference", token=HF_TOKEN)
 
 
-def collect_images(folder: Path):
-    """Все изображения из папки (без рекурсии), отсортированные по имени."""
-    files = []
-    for ext in IMAGE_EXTS:
-        files.extend(folder.glob(ext))
-    return sorted(set(files), key=lambda p: p.name.lower())
-
-
-def classify_batch(classifier, images, labels=CANDIDATE_LABELS):
-    """Пакетная zero-shot классификация. Возвращает список (label, score)."""
-    results_out = []
-    total = len(images)
-    for start in range(0, total, BATCH_SIZE):
-        batch = images[start:start + BATCH_SIZE]
-        results = classifier(batch, candidate_labels=labels)
-        for res in results:
-            top = res[0]
-            results_out.append((top["label"], float(top["score"])))
-        print(f"  Обработано {min(start + BATCH_SIZE, total)}/{total}")
-    return results_out
-
-
-def auto_label_dataset():
-    """Автоматически размечает все фото из dataset/ через ANNOTATOR_MODEL.
-       Сохраняет результат в labels_auto.csv: filename,label,confidence
-    """
-    files = collect_images(DATA_DIR)
-    if not files:
-        raise SystemExit(f"В папке {DATA_DIR} не найдено изображений.")
-
-    print(f"Найдено {len(files)} изображений. Загружаем модель-аннотатор: {ANNOTATOR_MODEL}")
-    classifier = pipeline(
-        "zero-shot-image-classification",
-        model=ANNOTATOR_MODEL,
-        device=0 if torch.cuda.is_available() else -1,
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ----------
+def list_images():
+    if not DATASET_DIR.exists():
+        return []
+    return sorted(
+        p for p in DATASET_DIR.iterdir()
+        if p.suffix.lower() in IMAGE_EXTS and p.is_file()
     )
 
-    images = [Image.open(f).convert("RGB") for f in files]
+
+def zero_shot(image_path):
+    """Запрос к Inference API. Возвращает (label, confidence)."""
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
+        result = client.zero_shot_image_classification(
+            image=img,
+            model=ANNOTATOR_MODEL if image_path.parent == DATASET_DIR else None,
+            candidate_labels=CANDIDATE_LABELS,
+        )
+    best = max(result, key=lambda r: r["score"])
+    return LABEL_MAP.get(best["label"], "uncertain"), float(best["score"])
+
+
+def predict_with_model(model_name, image_path):
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
+        result = client.zero_shot_image_classification(
+            image=img,
+            model=model_name,
+            candidate_labels=CANDIDATE_LABELS,
+        )
+    best = max(result, key=lambda r: r["score"])
+    return LABEL_MAP.get(best["label"], "uncertain")
+
+
+def print_confusion(y_true, y_pred, title):
+    cm = confusion_matrix(y_true, y_pred, labels=["military", "civilian"])
+    print()
+    print(f"Матрица ошибок ({title}):")
+    print("Истина \\ Предсказание | военный | гражданский")
+    print(f"военный              | {cm[0][0]:>7} | {cm[0][1]:>10}")
+    print(f"гражданский          | {cm[1][0]:>7} | {cm[1][1]:>10}")
+    return cm
+
+
+# ---------- ШАГ 1: РАЗМЕТКА ----------
+def step_annotate():
+    images = list_images()
+    if not images:
+        print("В dataset/ нет изображений.")
+        sys.exit(1)
+
+    print("=== Шаг 1: автоматическая разметка датасета (Inference API) ===")
+    print(f"Найдено {len(images)} изображений. Модель-аннотатор: {ANNOTATOR_MODEL}")
     print("Автоматическая разметка...")
-    results = classify_batch(classifier, images)
 
     rows = []
-    for f, (label, score) in zip(files, results):
-        if score < CONFIDENCE_THRESHOLD:
-            cls = "uncertain"
-        elif label == CANDIDATE_LABELS[0]:
-            cls = "military"
-        else:
-            cls = "civilian"
-        rows.append((f.name, cls, f"{score:.4f}"))
-        print(f"  {f.name:<60} -> {cls:<10} (уверенность {score:.3f})")
+    for i, path in enumerate(images, 1):
+        label, conf = zero_shot(path)
+        if conf < CONFIDENCE_THRESHOLD:
+            label = "uncertain"
+        rows.append({"filename": path.name, "label": label, "confidence": f"{conf:.3f}"})
+        if i % 8 == 0 or i == len(images):
+            print(f"  Обработано {i}/{len(images)}")
 
-    with open(LABELS_CSV, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["filename", "label", "confidence"])
+    with LABELS_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["filename", "label", "confidence"])
+        writer.writeheader()
         writer.writerows(rows)
 
-    print(f"\nРазметка сохранена в {LABELS_CSV}")
-    n_mil = sum(1 for r in rows if r[1] == "military")
-    n_civ = sum(1 for r in rows if r[1] == "civilian")
-    n_unc = sum(1 for r in rows if r[1] == "uncertain")
-    print(f"Итого: военных={n_mil}, гражданских={n_civ}, спорных={n_unc}")
-    print("Проверьте файл labels_auto.csv и поправьте спорные/ошибочные метки,")
-    print("затем запустите скрипт снова — он прочитает CSV и посчитает метрики.")
+    mil = sum(1 for r in rows if r["label"] == "military")
+    civ = sum(1 for r in rows if r["label"] == "civilian")
+    unc = sum(1 for r in rows if r["label"] == "uncertain")
+
+    print()
+    print(f"Разметка сохранена в {LABELS_CSV}")
+    print(f"Итого: военных={mil}, гражданских={civ}, спорных={unc}")
 
 
-def load_labels_from_csv():
-    """Читает labels_auto.csv, возвращает images, true_labels, names.
-       Строки с 'uncertain' пропускаются.
-    """
-    if not LABELS_CSV.is_file():
-        return None, None, None
+# ---------- ШАГ 2: СРАВНЕНИЕ ----------
+def step_compare():
+    if not LABELS_CSV.exists():
+        print("Файл labels_auto.csv не найден. Сначала выполните шаг 1.")
+        sys.exit(1)
 
-    images, true_labels, names = [], [], []
-    with open(LABELS_CSV, encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            label = (row.get("label") or "").strip().lower()
-            fname = (row.get("filename") or "").strip()
-            if label not in ("military", "civilian"):
-                continue
-            path = DATA_DIR / fname
-            if not path.is_file():
-                print(f"  [пропуск] файл не найден: {fname}")
-                continue
-            images.append(Image.open(path).convert("RGB"))
-            true_labels.append(1 if label == "military" else 0)
-            names.append(fname)
-    return images, true_labels, names
+    entries = []
+    with LABELS_CSV.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            if r["label"] in ("military", "civilian"):
+                entries.append((r["filename"], r["label"]))
 
+    if not entries:
+        print("В labels_auto.csv нет строк military/civilian.")
+        sys.exit(1)
 
-def predict_with_model(model_name, images):
-    print(f"\nЗагрузка модели: {model_name}")
-    classifier = pipeline(
-        "zero-shot-image-classification",
-        model=model_name,
-        device=0 if torch.cuda.is_available() else -1,
-    )
-    results = classify_batch(classifier, images)
-    preds = [1 if lbl == CANDIDATE_LABELS[0] else 0 for lbl, _ in results]
-    return preds
+    mil = sum(1 for _, l in entries if l == "military")
+    civ = sum(1 for _, l in entries if l == "civilian")
 
+    print("=== Шаг 2: чтение разметки и сравнение моделей (Inference API) ===")
+    print(f"Загружено {len(entries)} изображений (военных: {mil}, гражданских: {civ})")
 
-def compute_metrics(true_labels, pred_labels, model_name, names=None):
-    acc = accuracy_score(true_labels, pred_labels)
-    prec = precision_score(true_labels, pred_labels, zero_division=0)
-    rec = recall_score(true_labels, pred_labels, zero_division=0)
-    f1 = f1_score(true_labels, pred_labels, zero_division=0)
+    results = {}
+    for model_name in (MODEL_1, MODEL_2):
+        print()
+        print(f"Запрос к модели: {model_name} (Inference API)")
+        y_true, y_pred, errors = [], [], []
+        for i, (fname, true_label) in enumerate(entries, 1):
+            pred = predict_with_model(model_name, DATASET_DIR / fname)
+            y_true.append(true_label)
+            y_pred.append(pred)
+            if pred != true_label:
+                errors.append((fname, true_label, pred))
+            if i % 8 == 0 or i == len(entries):
+                print(f"  Обработано {i}/{len(entries)}")
 
-    print(f"\n===== {model_name} =====")
-    print(f"Accuracy : {acc:.4f}")
-    print(f"Precision: {prec:.4f}")
-    print(f"Recall   : {rec:.4f}")
-    print(f"F1-score : {f1:.4f}")
-    cm = confusion_matrix(true_labels, pred_labels)
-    print(f"Матрица ошибок:\n{cm}")
-    print("  (строки: истина [военный, гражданский], столбцы: предсказание [военный, гражданский])")
+        acc = accuracy_score(y_true, y_pred)
+        prec = precision_score(y_true, y_pred, pos_label="military", zero_division=0)
+        rec = recall_score(y_true, y_pred, pos_label="military", zero_division=0)
+        f1 = f1_score(y_true, y_pred, pos_label="military", zero_division=0)
 
-    if names:
-        errors = [(names[i], true_labels[i], pred_labels[i])
-                  for i in range(len(true_labels)) if true_labels[i] != pred_labels[i]]
+        print()
+        print(f"===== {model_name} =====")
+        print(f"Accuracy : {acc:.4f}")
+        print(f"Precision: {prec:.4f}")
+        print(f"Recall   : {rec:.4f}")
+        print(f"F1-score : {f1:.4f}")
+
+        print_confusion(y_true, y_pred, model_name)
+
         if errors:
             print("Ошибочные файлы:")
-            for n, t, p in errors:
-                print(f"  {n}: истина={'военный' if t==1 else 'гражданский'}, "
-                      f"предсказано={'военный' if p==1 else 'гражданский'}")
+            for fname, t, p in errors:
+                print(f"  {fname}: истина={t}, предсказано={p}")
         else:
             print("Ошибок нет.")
-    return {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1}
+
+        results[model_name] = {
+            "acc": acc, "prec": prec, "rec": rec, "f1": f1,
+            "y_true": y_true, "y_pred": y_pred, "errors": errors,
+        }
+
+    print()
+    print("=" * 50)
+    print("Сводное сравнение моделей (Inference API)")
+    print("=" * 50)
+    header = f"{'Метрика':<12}{MODEL_1:<40}{MODEL_2:<40}"
+    print(header)
+    print("-" * len(header))
+    for key, name in (("acc", "Accuracy"), ("prec", "Precision"), ("rec", "Recall"), ("f1", "F1")):
+        r1 = results[MODEL_1][key]
+        r2 = results[MODEL_2][key]
+        print(f"{name:<12}{r1:<40.4f}{r2:<40.4f}")
+
+    print()
+    print("=" * 50)
+    print("Полные матрицы ошибок")
+    print("=" * 50)
+    for model_name in (MODEL_1, MODEL_2):
+        r = results[model_name]
+        cm = confusion_matrix(r["y_true"], r["y_pred"], labels=["military", "civilian"])
+        print()
+        print(f"Матрица ошибок ({model_name}):")
+        print("Истина \\ Предсказание | военный | гражданский")
+        print(f"военный              | {cm[0][0]:>7} | {cm[0][1]:>10}")
+        print(f"гражданский          | {cm[1][0]:>7} | {cm[1][1]:>10}")
+
+
+# ---------- MAIN ----------
+def main():
+    if not LABELS_CSV.exists():
+        step_annotate()
+    else:
+        step_compare()
 
 
 if __name__ == "__main__":
-    if not LABELS_CSV.is_file():
-        print("=== Шаг 1: автоматическая разметка датасета ===")
-        auto_label_dataset()
-        print("\nТеперь просмотрите labels_auto.csv. Если всё устраивает —")
-        print("запустите скрипт ещё раз для сравнения моделей.")
-        raise SystemExit(0)
-
-    print("=== Шаг 2: чтение разметки и сравнение моделей ===")
-    images, true_labels, names = load_labels_from_csv()
-    if not images:
-        raise SystemExit("В labels_auto.csv нет валидных строк (military/civilian).")
-
-    n_mil = sum(true_labels)
-    n_civ = len(true_labels) - n_mil
-    print(f"Загружено {len(images)} изображений (военных: {n_mil}, гражданских: {n_civ})")
-
-    preds_1 = predict_with_model(MODEL_1, images)
-    metrics_1 = compute_metrics(true_labels, preds_1, MODEL_1, names)
-
-    preds_2 = predict_with_model(MODEL_2, images)
-    metrics_2 = compute_metrics(true_labels, preds_2, MODEL_2, names)
-
-    print("\n" + "=" * 50)
-    print("Сводное сравнение моделей")
-    print("=" * 50)
-    print(f"{'Метрика':<12} {MODEL_1:<35} {MODEL_2:<35}")
-    print("-" * 82)
-    for key in ["accuracy", "precision", "recall", "f1"]:
-        print(f"{key.capitalize():<12} {metrics_1[key]:<35.4f} {metrics_2[key]:<35.4f}")
+    main()
