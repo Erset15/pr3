@@ -260,10 +260,3 @@ venv/
 dataset/labels_auto.csv
 
 ---
-
-Файлы готовы к коммиту:
-
-powershell
-git add README.md requirements.txt .gitignore
-git commit -m "Update README: Inference API, full tables and confusion matrices"
-git push
