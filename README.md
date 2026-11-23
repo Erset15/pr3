@@ -22,7 +22,6 @@ google/siglip-base-patch16-224 | Модель №2 для сравнения
 
 ## Структура проекта
 
-text
 pr3/
 ├── main.py                 # основной скрипт (через Inference API)
 ├── requirements.txt        # зависимости
@@ -81,7 +80,6 @@ python main.py
 
 Пример вывода:
 
-text
 === Шаг 1: автоматическая разметка датасета (Inference API) ===
 Найдено 30 изображений. Модель-аннотатор: openai/clip-vit-base-patch32
 Автоматическая разметка...
@@ -112,7 +110,6 @@ python main.py
 
 Пример вывода (полный):
 
-text
 === Шаг 2: чтение разметки и сравнение моделей (Inference API) ===
 Загружено 26 изображений (военных: 12, гражданских: 14)
 
@@ -240,7 +237,6 @@ scikit-learn
 
 requirements.txt
 
-text
 huggingface_hub>=0.23
 pillow>=10.0
 scikit-learn>=1.3
@@ -249,7 +245,6 @@ scikit-learn>=1.3
 
 .gitignore
 
-text
 __pycache__/
 *.pyc
 .venv/
